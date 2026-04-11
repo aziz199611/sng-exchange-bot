@@ -22,6 +22,21 @@ def init_db():
     """)
     
     c.execute("""
+        CREATE TABLE IF NOT EXISTS managers (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    
+    c.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_number TEXT UNIQUE,
@@ -194,6 +209,101 @@ def clear_state(user_id):
     c.execute("DELETE FROM states WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
+
+# === MANAGERS ===
+
+def get_managers():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT user_id, username FROM managers")
+    rows = c.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "username": r[1]} for r in rows]
+
+
+def get_manager_ids():
+    return [m["user_id"] for m in get_managers()]
+
+
+def add_manager(user_id, username=None):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO managers (user_id, username) VALUES (?, ?)", (user_id, username))
+    conn.commit()
+    conn.close()
+
+
+def remove_manager(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM managers WHERE user_id = ?", (user_id,))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def is_manager(user_id):
+    return user_id in get_manager_ids()
+
+
+# === SETTINGS ===
+
+def get_setting(key, default=None):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+
+
+def get_rate():
+    return float(get_setting("rate", "12.85"))
+
+
+def set_rate(rate):
+    set_setting("rate", str(rate))
+
+
+# === STATS ===
+
+def get_stats():
+    conn = get_db()
+    c = conn.cursor()
+    
+    c.execute("SELECT COUNT(*) FROM orders")
+    total = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'")
+    completed = c.fetchone()[0]
+    
+    c.execute("SELECT COALESCE(SUM(rub_amount), 0) FROM orders WHERE status = 'completed'")
+    total_rub = c.fetchone()[0]
+    
+    c.execute("SELECT COALESCE(SUM(cny_amount), 0) FROM orders WHERE status = 'completed'")
+    total_cny = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM orders WHERE status NOT IN ('completed', 'cancelled')")
+    active = c.fetchone()[0]
+    
+    conn.close()
+    return {
+        "total": total,
+        "completed": completed,
+        "active": active,
+        "total_rub": total_rub,
+        "total_cny": total_cny
+    }
 
 
 init_db()
