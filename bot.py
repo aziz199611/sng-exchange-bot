@@ -10,6 +10,22 @@ logging.basicConfig(level=logging.INFO)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Владелец бота (твой ID)
+OWNER_ID = 714403607
+
+
+def is_manager(user_id):
+    """Проверка менеджера (включая владельца)"""
+    return user_id == OWNER_ID or db.is_manager(user_id)
+
+
+def get_all_manager_ids():
+    """Все менеджеры + владелец"""
+    ids = db.get_manager_ids()
+    if OWNER_ID not in ids:
+        ids.append(OWNER_ID)
+    return ids
+
 
 # ============ KEYBOARDS ============
 
@@ -23,7 +39,7 @@ def main_kb(user_id):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("💱 Обменять валюту", web_app=types.WebAppInfo(url=WEBAPP_URL)))
     kb.row(types.KeyboardButton("📋 Мои заявки"), types.KeyboardButton("💬 Поддержка"))
-    if user_id in MANAGER_IDS:
+    if is_manager(user_id):
         kb.add(types.KeyboardButton("👨‍💼 Панель менеджера"))
     return kb
 
@@ -76,6 +92,103 @@ def order_kb(order):
 
 # ============ HANDLERS ============
 
+# === OWNER COMMANDS ===
+
+@bot.message_handler(commands=['addmanager'])
+def cmd_addmanager(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    
+    parts = msg.text.split()
+    if len(parts) < 2:
+        bot.send_message(msg.chat.id, "❌ Использование: /addmanager <user_id>")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        db.add_manager(user_id)
+        bot.send_message(msg.chat.id, f"✅ Менеджер {user_id} добавлен!")
+    except ValueError:
+        bot.send_message(msg.chat.id, "❌ ID должен быть числом")
+
+
+@bot.message_handler(commands=['delmanager'])
+def cmd_delmanager(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    
+    parts = msg.text.split()
+    if len(parts) < 2:
+        bot.send_message(msg.chat.id, "❌ Использование: /delmanager <user_id>")
+        return
+    
+    try:
+        user_id = int(parts[1])
+        if db.remove_manager(user_id):
+            bot.send_message(msg.chat.id, f"✅ Менеджер {user_id} удалён!")
+        else:
+            bot.send_message(msg.chat.id, f"❌ Менеджер {user_id} не найден")
+    except ValueError:
+        bot.send_message(msg.chat.id, "❌ ID должен быть числом")
+
+
+@bot.message_handler(commands=['managers'])
+def cmd_managers(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    
+    managers = db.get_managers()
+    if not managers:
+        bot.send_message(msg.chat.id, "📋 Менеджеров нет (кроме вас)")
+        return
+    
+    text = "👨‍💼 <b>Менеджеры:</b>\n\n"
+    for m in managers:
+        username = f"@{m['username']}" if m.get('username') else "нет username"
+        text += f"• {m['user_id']} ({username})\n"
+    
+    bot.send_message(msg.chat.id, text, parse_mode="HTML")
+
+
+@bot.message_handler(commands=['setrate'])
+def cmd_setrate(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    
+    parts = msg.text.split()
+    if len(parts) < 2:
+        current = db.get_rate()
+        bot.send_message(msg.chat.id, f"📊 Текущий курс: 1 CNY = {current} ₽\n\nИзменить: /setrate <курс>")
+        return
+    
+    try:
+        rate = float(parts[1].replace(",", "."))
+        db.set_rate(rate)
+        bot.send_message(msg.chat.id, f"✅ Курс изменён: 1 CNY = {rate} ₽")
+    except ValueError:
+        bot.send_message(msg.chat.id, "❌ Курс должен быть числом")
+
+
+@bot.message_handler(commands=['stats'])
+def cmd_stats(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    
+    s = db.get_stats()
+    text = f"""📊 <b>Статистика</b>
+
+📋 Всего заявок: {s['total']}
+✅ Выполнено: {s['completed']}
+🔄 Активных: {s['active']}
+
+💰 Оборот: {s['total_rub']:,.0f} ₽
+💴 Отправлено: {s['total_cny']:,.2f} ¥
+"""
+    bot.send_message(msg.chat.id, text, parse_mode="HTML")
+
+
+# === USER COMMANDS ===
+
 @bot.message_handler(commands=['start', 'keyboard'])
 def cmd_start(msg):
     user = db.get_user(msg.from_user.id)
@@ -120,7 +233,7 @@ def on_webapp(msg):
         bot.send_message(msg.chat.id, text, parse_mode="HTML", reply_markup=method_kb())
         
         # Уведомление менеджерам
-        for mgr in MANAGER_IDS:
+        for mgr in get_all_manager_ids():
             try:
                 bot.send_message(mgr, f"🆕 Новая заявка #{order['order_number']}")
             except:
@@ -201,7 +314,7 @@ def support(msg):
 
 @bot.message_handler(func=lambda m: m.text == "👨‍💼 Панель менеджера")
 def manager_panel(msg):
-    if msg.from_user.id not in MANAGER_IDS:
+    if not is_manager(msg.from_user.id):
         return
     
     new = len(db.get_new_orders())
@@ -218,7 +331,7 @@ def manager_panel(msg):
 
 @bot.callback_query_handler(func=lambda c: c.data in ["mgr:menu", "mgr:refresh"])
 def mgr_menu(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     new = len(db.get_new_orders())
@@ -237,7 +350,7 @@ def mgr_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "mgr:new")
 def mgr_new(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     orders = db.get_new_orders()
@@ -255,7 +368,7 @@ def mgr_new(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "mgr:active")
 def mgr_active(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     orders = db.get_active_orders()
@@ -273,7 +386,7 @@ def mgr_active(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mgr:order:"))
 def mgr_order(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     order_id = int(call.data.split(":")[2])
@@ -305,7 +418,7 @@ def mgr_order(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mgr:take:"))
 def mgr_take(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     order_id = int(call.data.split(":")[2])
@@ -337,7 +450,7 @@ def mgr_take(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mgr:done:"))
 def mgr_done(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     order_id = int(call.data.split(":")[2])
@@ -357,7 +470,7 @@ def mgr_done(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mgr:cancel:"))
 def mgr_cancel(call):
-    if call.from_user.id not in MANAGER_IDS:
+    if not is_manager(call.from_user.id):
         return
     
     order_id = int(call.data.split(":")[2])
@@ -382,7 +495,7 @@ def relay(msg):
     state, data = db.get_state(user_id)
     
     # Менеджер пишет клиенту
-    if user_id in MANAGER_IDS and state == "mgr_chat" and data:
+    if is_manager(user_id) and state == "mgr_chat" and data:
         order = db.get_order(int(data))
         if order:
             try:
@@ -412,7 +525,7 @@ def relay(msg):
         except:
             bot.send_message(msg.chat.id, "⏳ Менеджер получит ваше сообщение")
     elif order:
-        for mgr in MANAGER_IDS:
+        for mgr in get_all_manager_ids():
             try:
                 bot.send_message(mgr, f"💬 Новое сообщение в заявке #{order['order_number']}")
             except:
