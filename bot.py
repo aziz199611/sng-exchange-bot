@@ -1,328 +1,170 @@
-import sqlite3
+import telebot
+from telebot import types
 import json
-from datetime import datetime
-from config import DATABASE_PATH, DEFAULT_RATES
+import logging
 
-def get_db():
-return sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+from config import *
+import database as db
 
-def init_db():
-conn = get_db()
-c = conn.cursor()
+logging.basicConfig(level=logging.INFO)
 
-```
-c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        phone TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-""")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-c.execute("""
-    CREATE TABLE IF NOT EXISTS managers (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        added_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_number TEXT UNIQUE,
-        user_id INTEGER,
-        cny_amount REAL,
-        rub_amount REAL,
-        rate REAL,
-        status TEXT DEFAULT 'new',
-        manager_id INTEGER,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS states (
-        user_id INTEGER PRIMARY KEY,
-        state TEXT,
-        data TEXT
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS photos (
-        key TEXT PRIMARY KEY,
-        file_id TEXT
-    )
-""")
-
-conn.commit()
-conn.close()
-```
-
-# === USERS ===
-
-def get_user(user_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT * FROM users WHERE user_id = ?”, (user_id,))
-row = c.fetchone()
-conn.close()
-if row:
-return {“user_id”: row[0], “username”: row[1], “first_name”: row[2], “phone”: row[3]}
-return None
-
-def save_user(user_id, username, first_name, phone=None):
-conn = get_db()
-c = conn.cursor()
-c.execute(”””
-INSERT OR REPLACE INTO users (user_id, username, first_name, phone)
-VALUES (?, ?, ?, COALESCE(?, (SELECT phone FROM users WHERE user_id = ?)))
-“””, (user_id, username, first_name, phone, user_id))
-conn.commit()
-conn.close()
-
-# === ORDERS ===
-
-def gen_order_number():
-now = datetime.now()
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT COUNT(*) FROM orders WHERE date(created_at) = date(‘now’)”)
-n = c.fetchone()[0] + 1
-conn.close()
-return f”SNG-{now.strftime(’%d%m’)}-{n:04d}”
-
-def create_order(user_id, cny_amount, rub_amount, rate):
-conn = get_db()
-c = conn.cursor()
-order_number = gen_order_number()
-c.execute(”””
-INSERT INTO orders (order_number, user_id, cny_amount, rub_amount, rate, status)
-VALUES (?, ?, ?, ?, ?, ‘new’)
-“””, (order_number, user_id, cny_amount, rub_amount, rate))
-order_id = c.lastrowid
-conn.commit()
-conn.close()
-return get_order(order_id)
-
-def get_order(order_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(”””
-SELECT o.*, u.username, u.first_name, u.phone
-FROM orders o LEFT JOIN users u ON o.user_id = u.user_id
-WHERE o.id = ?
-“””, (order_id,))
-row = c.fetchone()
-conn.close()
-if row:
-return {
-“id”: row[0], “order_number”: row[1], “user_id”: row[2],
-“cny_amount”: row[3], “rub_amount”: row[4], “rate”: row[5],
-“status”: row[6], “manager_id”: row[7], “created_at”: row[8],
-“username”: row[9], “first_name”: row[10], “phone”: row[11]
-}
-return None
-
-def get_user_active_order(user_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(”””
-SELECT id FROM orders
-WHERE user_id = ? AND status NOT IN (‘completed’, ‘cancelled’, ‘closed’)
-ORDER BY id DESC LIMIT 1
-“””, (user_id,))
-row = c.fetchone()
-conn.close()
-if row:
-return get_order(row[0])
-return None
-
-def get_new_orders():
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT id FROM orders WHERE status = ‘new’ ORDER BY id DESC”)
-rows = c.fetchall()
-conn.close()
-return [get_order(r[0]) for r in rows]
-
-def get_active_orders():
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT id FROM orders WHERE status NOT IN (‘completed’, ‘cancelled’, ‘closed’) ORDER BY id DESC”)
-rows = c.fetchall()
-conn.close()
-return [get_order(r[0]) for r in rows]
-
-def update_order(order_id, **kwargs):
-conn = get_db()
-c = conn.cursor()
-fields = “, “.join(f”{k} = ?” for k in kwargs)
-values = list(kwargs.values()) + [order_id]
-c.execute(f”UPDATE orders SET {fields} WHERE id = ?”, values)
-conn.commit()
-conn.close()
-
-# === STATES ===
-
-def get_state(user_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT state, data FROM states WHERE user_id = ?”, (user_id,))
-row = c.fetchone()
-conn.close()
-if row:
-return row[0], json.loads(row[1]) if row[1] else {}
-return None, {}
-
-def set_state(user_id, state, data=None):
-conn = get_db()
-c = conn.cursor()
-c.execute(“INSERT OR REPLACE INTO states (user_id, state, data) VALUES (?, ?, ?)”,
-(user_id, state, json.dumps(data) if data else None))
-conn.commit()
-conn.close()
-
-def clear_state(user_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(“DELETE FROM states WHERE user_id = ?”, (user_id,))
-conn.commit()
-conn.close()
-
-# === MANAGERS ===
-
-def get_managers():
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT user_id, username FROM managers”)
-rows = c.fetchall()
-conn.close()
-return [{“user_id”: r[0], “username”: r[1]} for r in rows]
-
-def get_manager_ids():
-return [m[“user_id”] for m in get_managers()]
-
-def add_manager(user_id, username=None):
-conn = get_db()
-c = conn.cursor()
-c.execute(“INSERT OR REPLACE INTO managers (user_id, username) VALUES (?, ?)”, (user_id, username))
-conn.commit()
-conn.close()
-
-def remove_manager(user_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(“DELETE FROM managers WHERE user_id = ?”, (user_id,))
-affected = c.rowcount
-conn.commit()
-conn.close()
-return affected > 0
 
 def is_manager(user_id):
-from config import OWNER_ID
-return user_id == OWNER_ID or user_id in get_manager_ids()
+    return user_id == OWNER_ID or db.is_manager(user_id)
 
-# === SETTINGS / RATES ===
 
-def get_setting(key, default=None):
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT value FROM settings WHERE key = ?”, (key,))
-row = c.fetchone()
-conn.close()
-return row[0] if row else default
+def get_all_manager_ids():
+    ids = db.get_manager_ids()
+    if OWNER_ID not in ids:
+        ids.append(OWNER_ID)
+    return ids
 
-def set_setting(key, value):
-conn = get_db()
-c = conn.cursor()
-c.execute(“INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)”, (key, str(value)))
-conn.commit()
-conn.close()
 
-def get_rates():
-“”“Возвращает 6 градаций курса”””
-rates_json = get_setting(“rates”)
-if rates_json:
-return json.loads(rates_json)
-return DEFAULT_RATES
+def contact_kb():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton('Поделиться контактом', request_contact=True))
+    return kb
 
-def set_rates(rates):
-set_setting(“rates”, json.dumps(rates))
 
-def get_rate_for_amount(cny_amount):
-“”“Возвращает курс для суммы CNY”””
-rates = get_rates()
-if cny_amount <= 100:
-return rates.get(“1-100”, 19.29)
-elif cny_amount <= 500:
-return rates.get(“101-500”, 12.57)
-elif cny_amount <= 1000:
-return rates.get(“501-1000”, 12.38)
-elif cny_amount <= 5000:
-return rates.get(“1001-5000”, 12.17)
-elif cny_amount <= 20000:
-return rates.get(“5001-20000”, 12.13)
-else:
-return rates.get(“20001+”, 12.06)
+def main_kb(user_id):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton('Обменять валюту'))
+    kb.row(types.KeyboardButton('Мои заявки'), types.KeyboardButton('Поддержка'))
+    if is_manager(user_id):
+        kb.add(types.KeyboardButton('Панель менеджера'))
+    return kb
 
-# === PHOTOS ===
 
-def get_photo(key):
-conn = get_db()
-c = conn.cursor()
-c.execute(“SELECT file_id FROM photos WHERE key = ?”, (key,))
-row = c.fetchone()
-conn.close()
-return row[0] if row else None
+def buy_currency_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton('Китайский юань (CNY)', callback_data='buy:cny'))
+    kb.add(types.InlineKeyboardButton('Отмена', callback_data='cancel'))
+    return kb
 
-def set_photo(key, file_id):
-conn = get_db()
-c = conn.cursor()
-c.execute(“INSERT OR REPLACE INTO photos (key, file_id) VALUES (?, ?)”, (key, file_id))
-conn.commit()
-conn.close()
 
-# === STATS ===
+def pay_currency_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton('Российский рубль (RUB)', callback_data='pay:rub'))
+    kb.add(types.InlineKeyboardButton('Отмена', callback_data='cancel'))
+    return kb
 
-def get_stats():
-conn = get_db()
-c = conn.cursor()
 
-```
-c.execute("SELECT COUNT(*) FROM orders")
-total = c.fetchone()[0]
+def confirm_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton('Продолжить', callback_data='confirm:yes'),
+        types.InlineKeyboardButton('Отмена', callback_data='confirm:no')
+    )
+    return kb
 
-c.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'")
-completed = c.fetchone()[0]
 
-c.execute("SELECT COALESCE(SUM(rub_amount), 0) FROM orders WHERE status = 'completed'")
-total_rub = c.fetchone()[0]
+def method_kb():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton('Alipay', callback_data='method:alipay'),
+        types.InlineKeyboardButton('WeChat', callback_data='method:wechat'),
+        types.InlineKeyboardButton('Банковская карта', callback_data='method:card')
+    )
+    return kb
 
-c.execute("SELECT COALESCE(SUM(cny_amount), 0) FROM orders WHERE status = 'completed'")
-total_cny = c.fetchone()[0]
 
-c.execute("SELECT COUNT(*) FROM orders WHERE status NOT IN ('completed', 'cancelled', 'closed')")
-active = c.fetchone()[0]
+def manager_kb():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton('Новые заявки', callback_data='mgr:new'),
+        types.InlineKeyboardButton('Все активные', callback_data='mgr:active'),
+        types.InlineKeyboardButton('Обновить', callback_data='mgr:refresh')
+    )
+    return kb
 
-conn.close()
-return {
-    "total": total,
-    "completed": completed,
-    "active": active,
-    "total_rub": total_rub,
-    "total_cny": total_cny
-}
-```
 
-init_db()
+def orders_kb(orders):
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for o in orders[:10]:
+        status = {'new': 'NEW', 'in_progress': 'WORK'}.get(o['status'], '?')
+        name = (o.get('first_name') or 'Client')[:12]
+        text = status + ' #' + o['order_number'][-4:] + ' ' + name + ' ' + str(int(o['cny_amount'])) + 'Y'
+        kb.add(types.InlineKeyboardButton(text, callback_data='mgr:order:' + str(o['id'])))
+    kb.add(types.InlineKeyboardButton('Назад', callback_data='mgr:menu'))
+    return kb
+
+
+def order_kb(order):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    if order['status'] == 'new':
+        kb.add(types.InlineKeyboardButton('Взять', callback_data='mgr:take:' + str(order['id'])))
+    if order['status'] not in ('completed', 'cancelled', 'closed'):
+        kb.row(
+            types.InlineKeyboardButton('Выполнено', callback_data='mgr:done:' + str(order['id'])),
+            types.InlineKeyboardButton('Закрыть', callback_data='mgr:close:' + str(order['id']))
+        )
+    kb.add(types.InlineKeyboardButton('К заявкам', callback_data='mgr:active'))
+    return kb
+
+
+@bot.message_handler(commands=['addmanager'])
+def cmd_addmanager(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    parts = msg.text.split()
+    if len(parts) < 2:
+        bot.send_message(msg.chat.id, 'Использование: /addmanager user_id')
+        return
+    try:
+        user_id = int(parts[1])
+        db.add_manager(user_id)
+        bot.send_message(msg.chat.id, 'Менеджер ' + str(user_id) + ' добавлен!')
+    except ValueError:
+        bot.send_message(msg.chat.id, 'ID должен быть числом')
+
+
+@bot.message_handler(commands=['delmanager'])
+def cmd_delmanager(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    parts = msg.text.split()
+    if len(parts) < 2:
+        bot.send_message(msg.chat.id, 'Использование: /delmanager user_id')
+        return
+    try:
+        user_id = int(parts[1])
+        if db.remove_manager(user_id):
+            bot.send_message(msg.chat.id, 'Менеджер ' + str(user_id) + ' удален!')
+        else:
+            bot.send_message(msg.chat.id, 'Менеджер ' + str(user_id) + ' не найден')
+    except ValueError:
+        bot.send_message(msg.chat.id, 'ID должен быть числом')
+
+
+@bot.message_handler(commands=['managers'])
+def cmd_managers(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    managers = db.get_managers()
+    if not managers:
+        bot.send_message(msg.chat.id, 'Менеджеров нет (кроме вас)')
+        return
+    text = '<b>Менеджеры:</b>\n\n'
+    for m in managers:
+        username = '@' + m['username'] if m.get('username') else 'нет username'
+        text = text + str(m['user_id']) + ' (' + username + ')\n'
+    bot.send_message(msg.chat.id, text, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['setrates'])
+def cmd_setrates(msg):
+    if msg.from_user.id != OWNER_ID:
+        return
+    parts = msg.text.split()
+    if len(parts) < 7:
+        rates = db.get_rates()
+        text = '<b>Текущие курсы (1 CNY = X RUB):</b>\n\n'
+        text = text + '1-100: ' + str(rates.get('1-100', 19.29)) + '\n'
+        text = text + '101-500: ' + str(rates.get('101-500', 12.57)) + '\n'
+        text = text + '501-1000: ' + str(rates.get('501-1000', 12.38)) + '\n'
+        text = text + '1001-5000: ' + str(rates.get('1001-5000', 12.17)) + '\n'
+        text = text + '5001-20000: ' + str(rates.get('5001-20000', 12.13)) + '\n'
+        text = text + '20001+: ' + str(rates.get('20001+', 12.06)) + '\n\n'
+        text = text + '<b>Изменить:</b>\n/setrates 19.29 12​​​​​​​​​​​​​​​​
